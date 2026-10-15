@@ -2,8 +2,8 @@ import * as anchor from "@coral-xyz/anchor";
 import { AnchorProvider, BN, Program, Wallet } from "@coral-xyz/anchor";
 import { Keypair, LAMPORTS_PER_SOL, PublicKey } from "@solana/web3.js";
 import * as fs from "fs";
-import { getStakePool, randomStakeSeed } from "../tests/helpers";
-import { getConnection, getStakePoolAccount, getStakePoolProgramId, getStakerProgramId } from "./utils";
+import { getStakePool, getValidatorStakeInfo, randomStakeSeed, transientStakeSeedFor } from "../tests/helpers";
+import { getConnection, getStakePoolAccount, getStakePoolProgramId, getStakerProgramId, parseU64Arg } from "./utils";
 
 // Get the Solana connection
 const connection = getConnection();
@@ -26,26 +26,33 @@ const provider = new AnchorProvider(connection, new Wallet(owner_keypair), { com
 anchor.setProvider(provider);
 
 // A script to increase the additional stake of a validator
-// usage: yarn increase-stake <validator> <amount> [ephemeral_seed]
+// usage: yarn increase-stake <validator> <amount> [ephemeral_seed] [transient_seed]
 // The optional ephemeral_seed lets the operator route around a poisoned ephemeral PDA;
 // when omitted a fresh random seed is used.
+// The optional transient_seed overrides the seed derived from the validator list: the
+// recorded transient_seed_suffix while transient stake is in flight (SPL rejects any other),
+// otherwise a fresh random seed. Pass it explicitly only to address a specific transient PDA.
+// It is positional, so it can only follow an ephemeral_seed: pass "" there to keep a fresh
+// random ephemeral seed rather than making one up, e.g.
+//   yarn increase-stake <validator> <amount> "" <transient_seed>
 async function main() {
 
   // parse arguments
   const args = process.argv.slice(2);
   const validatorVoteAccount = args.length >= 2 && new PublicKey(args[0])
   if (!validatorVoteAccount) {
-    console.error("Usage: yarn increase-stake <validator> <amount> [ephemeral_seed]");
+    console.error("Usage: yarn increase-stake <validator> <amount> [ephemeral_seed] [transient_seed]");
     process.exit(1);
   }
 
   const increaseStakeAmount = args.length >= 2 && Number(args[1]) * LAMPORTS_PER_SOL
   if (!increaseStakeAmount) {
-    console.error("Usage: yarn increase-stake <validator> <amount> [ephemeral_seed]");
+    console.error("Usage: yarn increase-stake <validator> <amount> [ephemeral_seed] [transient_seed]");
     process.exit(1);
   }
 
-  const ephemeralSeedArg = args[2] ? new BN(args[2]) : null;
+  const ephemeralSeedArg = args[2] ? parseU64Arg("ephemeral_seed", args[2]) : null;
+  const transientSeedArg = args[3] ? parseU64Arg("transient_seed", args[3]) : null;
 
   console.log(
     "validatorVoteAccount:", validatorVoteAccount.toBase58(),
@@ -80,20 +87,23 @@ async function main() {
     stake_pool_program_id
   );
 
-  const transientStakeSeed = 0;
-  const [transientStakeAccount] = await PublicKey.findProgramAddressSync(
+  // the transient seed must be the one recorded in the validator list while transient stake is
+  // in flight, and a fresh random seed otherwise; an explicit seed overrides it
+  const validatorInfo = await getValidatorStakeInfo(connection, stakePool.validatorList, validatorVoteAccount);
+  const transientStakeSeed = transientSeedArg ?? transientStakeSeedFor(validatorInfo);
+  const [transientStakeAccount] = PublicKey.findProgramAddressSync(
     [
       Buffer.from("transient"),
       validatorVoteAccount.toBuffer(),
       stake_pool_account.toBuffer(),
-      new BN(transientStakeSeed).toArrayLike(Buffer, "le", 8),
+      transientStakeSeed.toArrayLike(Buffer, "le", 8),
     ],
     stake_pool_program_id
   );
 
   console.log(
     "transientStakeAccount:", transientStakeAccount.toBase58(),
-    "transientStakeSeed:", transientStakeSeed,
+    "transientStakeSeed:", transientStakeSeed.toString(),
     "ephemeralStakeAccount:", ephemeralStakeAccount.toBase58(),
     "ephemeralStakeSeed:", ephemeralStakeSeed.toString()
   );
@@ -101,7 +111,7 @@ async function main() {
   // stake_maanger calls increase_validator_stake
   const program = await Program.at(staker_program_id, provider);
   const tx = await program.methods
-    .increaseValidatorStake(new BN(increaseStakeAmount), ephemeralStakeSeed)
+    .increaseValidatorStake(new BN(increaseStakeAmount), transientStakeSeed, ephemeralStakeSeed)
     .accounts({
       signer: stake_manager_keypair.publicKey,
       validatorVoteAccount: validatorVoteAccount,

@@ -47,6 +47,8 @@ pub struct RemoveAgent<'info> {
     #[account(
         mut,
         constraint = agent != access.owner.key() @ ErrorCode::CannotRemoveOwner,
+        // keeps at least one agent: removal always needs a second agent to sign
+        constraint = agent != signer.key() @ ErrorCode::CannotRemoveSelf,
         seeds = [b"agent", agent.as_ref()],
         bump,
         close = signer

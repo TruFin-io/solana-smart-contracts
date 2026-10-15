@@ -28,4 +28,6 @@ pub enum ErrorCode {
     NotUserOwner,
     #[msg("A third-party agent cannot clear a blacklisted user")]
     CannotClearBlacklistedUser,
+    #[msg("An agent cannot remove themselves")]
+    CannotRemoveSelf,
 }

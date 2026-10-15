@@ -23,6 +23,7 @@ import {
   findValidatorStakeAccount,
   randomStakeSeed,
   moveEpochForwardAndUpdatePool,
+  simulateExpectingLog,
 } from "./helpers";
 import { CreateStakePoolResponse } from "./stake_pool/types";
 
@@ -67,7 +68,10 @@ describe("ephemeral stake seed poisoning is mitigated by seed rotation (Immunefi
   let stakePoolInfo: CreateStakePoolResponse;
   let validatorVoteAccount: PublicKey;
 
-  let transientStakeAccount: PublicKey; // seed-0 (the program keeps transient seed 0)
+  // This file keeps the transient seed fixed at 0. Transient seed rotation, and the poisoning
+  // scenario it defends against, are covered in transient_poison.test.ts (Immunefi #94595).
+  const transientSeed = 0;
+  let transientStakeAccount: PublicKey;
   let validatorStakeAccount: PublicKey;
 
   before(async () => {
@@ -165,7 +169,7 @@ describe("ephemeral stake seed poisoning is mitigated by seed rotation (Immunefi
     transientStakeAccount = findTransientStakeAccount(
       validatorVoteAccount,
       stakePoolInfo.accounts.stakePoolAccount,
-      0
+      transientSeed
     );
   });
 
@@ -234,7 +238,7 @@ describe("ephemeral stake seed poisoning is mitigated by seed rotation (Immunefi
     // 2. a legitimate increase using that seed leaves the residual behind -> poisoned
     await provider.sendAndConfirm(
       await program.methods
-        .increaseValidatorStake(new BN(2 * LAMPORTS_PER_SOL), new BN(poisonSeed))
+        .increaseValidatorStake(new BN(2 * LAMPORTS_PER_SOL), new BN(transientSeed), new BN(poisonSeed))
         .accounts(rebalanceAccounts(poisonSeed))
         .transaction(),
       [stakeManager]
@@ -246,18 +250,16 @@ describe("ephemeral stake seed poisoning is mitigated by seed rotation (Immunefi
     assert.equal(poisoned.lamports, prefund);
 
     // 3. reusing the poisoned seed still fails (system Allocate "already in use")
-    const blockedTx = await program.methods
-      .increaseValidatorStake(new BN(1 * LAMPORTS_PER_SOL), new BN(poisonSeed))
-      .accounts(rebalanceAccounts(poisonSeed))
-      .transaction();
-    blockedTx.feePayer = owner.publicKey;
-    blockedTx.recentBlockhash = (await connection.getLatestBlockhash()).blockhash;
-    blockedTx.sign(owner.payer, stakeManager);
-    const blockedSim = await connection.simulateTransaction(blockedTx);
-    assert.ok(blockedSim.value.err, "reusing the poisoned seed must fail");
-    assert.isTrue(
-      (blockedSim.value.logs ?? []).some((l) => l.includes("already in use")),
-      "expected an 'already in use' Allocate failure on the poisoned seed"
+    await simulateExpectingLog(
+      connection,
+      await program.methods
+        .increaseValidatorStake(new BN(1 * LAMPORTS_PER_SOL), new BN(transientSeed), new BN(poisonSeed))
+        .accounts(rebalanceAccounts(poisonSeed))
+        .transaction(),
+      owner.payer,
+      [stakeManager],
+      "already in use",
+      "increase reusing the poisoned ephemeral seed"
     );
 
     // Clear the transient created by the poison increase so the fresh-seed increase below is a
@@ -273,7 +275,7 @@ describe("ephemeral stake seed poisoning is mitigated by seed rotation (Immunefi
     const freshSeed = randomStakeSeed(); // fresh random u64 seed
     const sig = await provider.sendAndConfirm(
       await program.methods
-        .increaseValidatorStake(new BN(1 * LAMPORTS_PER_SOL), freshSeed)
+        .increaseValidatorStake(new BN(1 * LAMPORTS_PER_SOL), new BN(transientSeed), freshSeed)
         .accounts(rebalanceAccounts(freshSeed))
         .transaction(),
       [stakeManager]
@@ -322,25 +324,23 @@ describe("ephemeral stake seed poisoning is mitigated by seed rotation (Immunefi
     const depositAmount = new BN(2 * LAMPORTS_PER_SOL);
 
     // reusing the poisoned seed 0 -> fails at system Allocate before any funds move
-    const blockedTx = await program.methods
-      .depositToSpecificValidator(depositAmount, new BN(0))
-      .accounts(depositAccounts(userPoolTokenATA, 0))
-      .transaction();
-    blockedTx.feePayer = user.publicKey;
-    blockedTx.recentBlockhash = (await connection.getLatestBlockhash()).blockhash;
-    blockedTx.sign(user);
-    const blockedSim = await connection.simulateTransaction(blockedTx);
-    assert.ok(blockedSim.value.err, "deposit reusing the poisoned seed must fail");
-    assert.isTrue(
-      (blockedSim.value.logs ?? []).some((l) => l.includes("already in use")),
-      "expected an 'already in use' Allocate failure on the poisoned seed"
+    await simulateExpectingLog(
+      connection,
+      await program.methods
+        .depositToSpecificValidator(depositAmount, new BN(transientSeed), new BN(0))
+        .accounts(depositAccounts(userPoolTokenATA, 0))
+        .transaction(),
+      user,
+      [],
+      "already in use",
+      "deposit reusing the poisoned ephemeral seed"
     );
 
     // a fresh seed routes around the poison -> deposit succeeds
     const freshSeed = randomStakeSeed();
     const sig = await provider.sendAndConfirm(
       await program.methods
-        .depositToSpecificValidator(depositAmount, freshSeed)
+        .depositToSpecificValidator(depositAmount, new BN(transientSeed), freshSeed)
         .accounts(depositAccounts(userPoolTokenATA, freshSeed))
         .transaction(),
       [user]
@@ -368,25 +368,23 @@ describe("ephemeral stake seed poisoning is mitigated by seed rotation (Immunefi
     const decreaseAmount = new BN(1 * LAMPORTS_PER_SOL);
 
     // reusing the poisoned seed 0 -> fails at system Allocate
-    const blockedTx = await program.methods
-      .decreaseValidatorStake(decreaseAmount, new BN(0))
-      .accounts(rebalanceAccounts(0))
-      .transaction();
-    blockedTx.feePayer = owner.publicKey;
-    blockedTx.recentBlockhash = (await connection.getLatestBlockhash()).blockhash;
-    blockedTx.sign(owner.payer, stakeManager);
-    const blockedSim = await connection.simulateTransaction(blockedTx);
-    assert.ok(blockedSim.value.err, "decrease reusing the poisoned seed must fail");
-    assert.isTrue(
-      (blockedSim.value.logs ?? []).some((l) => l.includes("already in use")),
-      "expected an 'already in use' Allocate failure on the poisoned seed"
+    await simulateExpectingLog(
+      connection,
+      await program.methods
+        .decreaseValidatorStake(decreaseAmount, new BN(transientSeed), new BN(0))
+        .accounts(rebalanceAccounts(0))
+        .transaction(),
+      owner.payer,
+      [stakeManager],
+      "already in use",
+      "decrease reusing the poisoned ephemeral seed"
     );
 
     // a fresh seed routes around the poison -> decrease succeeds
     const freshSeed = randomStakeSeed();
     const sig = await provider.sendAndConfirm(
       await program.methods
-        .decreaseValidatorStake(decreaseAmount, freshSeed)
+        .decreaseValidatorStake(decreaseAmount, new BN(transientSeed), freshSeed)
         .accounts(rebalanceAccounts(freshSeed))
         .transaction(),
       [stakeManager]

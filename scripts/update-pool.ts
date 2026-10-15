@@ -3,7 +3,7 @@ import { AnchorProvider, BN, Wallet, web3 } from "@coral-xyz/anchor";
 import { TOKEN_PROGRAM_ID } from "@solana/spl-token";
 import { ComputeBudgetProgram, Keypair, PublicKey, StakeProgram, Transaction, TransactionInstruction } from "@solana/web3.js";
 import * as fs from "fs";
-import { decodeValidatorListAccount, getStakePool } from "../tests/helpers";
+import { decodeValidatorListAccount, getStakePool, recordedTransientStakeSeed } from "../tests/helpers";
 import { getConnection, getStakePoolProgramId, getStakePoolAccount } from "./utils";
 
 // Get the Solana connection
@@ -51,18 +51,21 @@ async function main() {
       const [validatorStakeAccount] = PublicKey.findProgramAddressSync(validatorStakeAccountSeeds, stake_pool_program_id);
       console.log("  validatorStakeAccount PDA:", validatorStakeAccount.toBase58(), "validator_seed_suffix: ", validator_seed_suffix);
 
-      const transient_seed_suffix = validator.transient_seed_suffix;
+      // the recorded transient seed is a full u64 (chosen at random since #159), so it must not
+      // go through a JS number: that only holds 53 bits, and BN throws on anything larger. A
+      // wrong address here makes SPL skip the validator and the pool update fail as out of date.
+      const transientStakeSeed = recordedTransientStakeSeed(validator);
       const [transientStakeAccount] = PublicKey.findProgramAddressSync(
         [
           Buffer.from("transient"),
           validator.vote_account_address.toBuffer(),
           stake_pool_account.toBuffer(),
-          new BN(Number(transient_seed_suffix)).toArrayLike(Buffer, "le", 8),
+          transientStakeSeed.toArrayLike(Buffer, "le", 8),
         ],
         stake_pool_program_id
       );
 
-      console.log("  transientStakeAccount PDA:", transientStakeAccount.toBase58(), "transient_seed_suffix", Number(transient_seed_suffix) );
+      console.log("  transientStakeAccount PDA:", transientStakeAccount.toBase58(), "transient_seed_suffix", transientStakeSeed.toString());
 
       return [
         { pubkey: validatorStakeAccount, isSigner: false, isWritable: true }, // Validator stake account

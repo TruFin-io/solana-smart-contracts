@@ -93,6 +93,19 @@ pub struct StakerClaimOwnership<'info> {
         bump
     )]
     pub access: Account<'info, Access>,
+
+    // the owner is always an agent, as set up by initialize_staker; init_if_needed so an
+    // existing agent can still be promoted to owner
+    #[account(
+        init_if_needed,
+        payer = pending_owner,
+        space = ANCHOR_DISCRIMINATOR + Agent::INIT_SPACE,
+        seeds = [b"agent", pending_owner.key().as_ref()],
+        bump
+    )]
+    pub owner_agent_account: Account<'info, Agent>,
+
+    pub system_program: Program<'info, System>,
 }
 
 /// Processes the `ClaimOwnership` instruction

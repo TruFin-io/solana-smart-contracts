@@ -1,4 +1,5 @@
 import * as dotenv from "dotenv";
+import { BN } from "@coral-xyz/anchor";
 import { Connection } from "@solana/web3.js";
 import { RPC_URI, NETWORK } from "./rpc-endpoints";
 
@@ -33,3 +34,13 @@ export const getStakePoolAccount = () => {
   }
   return process.env.STAKE_POOL_ACCOUNT;
 }  
+
+// Parses a CLI argument that must be a u64 (a non-negative integer below 2^64), as the stake
+// seeds are; exits with a usage error otherwise.
+export function parseU64Arg(name: string, value: string): BN {
+  if (!/^\d+$/.test(value) || new BN(value).bitLength() > 64) {
+    console.error(`${name} must be a non-negative integer below 2^64, got "${value}"`);
+    process.exit(1);
+  }
+  return new BN(value);
+}
