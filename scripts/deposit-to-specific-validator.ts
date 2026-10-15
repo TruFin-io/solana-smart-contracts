@@ -4,7 +4,7 @@ import { Account, createAssociatedTokenAccountInstruction, getAccount, getAssoci
 import { Keypair, LAMPORTS_PER_SOL, PublicKey, Transaction, TransactionInstruction } from "@solana/web3.js";
 import * as fs from "fs";
 import * as os from "os";
-import { getStakePool, randomStakeSeed } from "../tests/helpers";
+import { getStakePool, getValidatorStakeInfo, randomStakeSeed, transientStakeSeedFor } from "../tests/helpers";
 import { getConnection, getStakePoolProgramId, getStakerProgramId, getStakePoolAccount } from "./utils";
 
 // Get the Solana connection
@@ -109,17 +109,20 @@ async function main() {
   );
   console.log("userWhitelist PDA: ", userWhitelistPDA.toBase58());
 
-  // derive the transient stake account PDA
-  const transientStakeSeed = 0;
-  const [transientStakeAccount] = await PublicKey.findProgramAddressSync(
+  // derive the transient stake account PDA. The seed must be the one recorded in the validator
+  // list while transient stake is in flight, and a fresh random seed otherwise.
+  const validatorInfo = await getValidatorStakeInfo(connection, stakePool.validatorList, validatorVoteAccount);
+  const transientStakeSeed = transientStakeSeedFor(validatorInfo);
+  const [transientStakeAccount] = PublicKey.findProgramAddressSync(
     [
       Buffer.from("transient"),
       validatorVoteAccount.toBuffer(),
       stake_pool_account.toBuffer(),
-      new BN(transientStakeSeed).toArrayLike(Buffer, "le", 8),
+      transientStakeSeed.toArrayLike(Buffer, "le", 8),
     ],
     stake_pool_program_id
   );
+  console.log("transientStakeAccount:", transientStakeAccount.toBase58(), "transientStakeSeed:", transientStakeSeed.toString());
 
   // derive the ephemeral stake account PDA using a fresh random seed so the pool-global
   // ephemeral address is never fixed
@@ -143,7 +146,7 @@ async function main() {
   );
 
   // deposit to specific validator instruction
-  const depositIx = await program.methods.depositToSpecificValidator(depositAmount, ephemeralStakeSeed)
+  const depositIx = await program.methods.depositToSpecificValidator(depositAmount, transientStakeSeed, ephemeralStakeSeed)
     .accounts({
       user: user.publicKey,
       stakePool: stake_pool_account,

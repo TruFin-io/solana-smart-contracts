@@ -1,6 +1,6 @@
 import { LAMPORTS_PER_SOL, PublicKey } from "@solana/web3.js";
 import { BN } from "@coral-xyz/anchor";
-import { decodeValidatorListAccount, getStakePool, stakeStatusToString } from "../tests/helpers";
+import { decodeValidatorListAccount, getStakePool, recordedTransientStakeSeed, stakeStatusToString } from "../tests/helpers";
 import { getConnection, getStakePoolAccount, getStakePoolProgramId } from "./utils";
 
 // Get the Solana connection
@@ -35,13 +35,15 @@ async function main() {
 
         const [validatorStakeAccount] = PublicKey.findProgramAddressSync(validatorStakeAccountSeeds, stake_pool_program_id);
 
-        const transient_seed_suffix = validator.transient_seed_suffix;
+        // the recorded transient seed is a full u64 (chosen at random since #159): never convert
+        // it through a JS number, which only holds 53 bits and makes BN throw on larger seeds
+        const transientStakeSeed = recordedTransientStakeSeed(validator);
         const [transientStakeAccount] = PublicKey.findProgramAddressSync(
             [
                 Buffer.from("transient"),
                 validator.vote_account_address.toBuffer(),
                 stake_pool_account.toBuffer(),
-                new BN(Number(transient_seed_suffix)).toArrayLike(Buffer, "le", 8),
+                transientStakeSeed.toArrayLike(Buffer, "le", 8),
             ],
             stake_pool_program_id
         );

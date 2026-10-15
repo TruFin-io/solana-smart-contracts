@@ -264,6 +264,12 @@ pub struct DepositToSpecificValidator<'info> {
 /// revocation, and the condition clears as epoch maintenance proceeds. See the
 /// "Stake Management Bot" notes in the README.
 ///
+/// `transient_stake_seed` is the caller-supplied SPL transient stake seed. SPL requires the seed
+/// recorded in the validator list while transient stake is in flight, and otherwise allocates a
+/// new transient PDA at the given seed. Taking it from the caller (instead of hardcoding 0) lets
+/// callers abandon a transient address that an outsider kept alive after its merge, which would
+/// otherwise make SPL's `Allocate` fail for good.
+///
 /// `ephemeral_stake_seed` is the caller-supplied SPL ephemeral stake seed; passing a fresh
 /// (e.g. random) seed each call lets callers route around a poisoned pool-global ephemeral PDA
 /// instead of being stuck on a single hardcoded address.

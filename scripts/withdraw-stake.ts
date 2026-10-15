@@ -4,7 +4,7 @@ import { getAssociatedTokenAddress, TOKEN_PROGRAM_ID } from "@solana/spl-token";
 import { Connection, Keypair, LAMPORTS_PER_SOL, PublicKey, StakeProgram, SystemProgram, Transaction, TransactionInstruction } from "@solana/web3.js";
 import * as fs from "fs";
 import * as os from "os";
-import { decodeValidatorListAccount, getStakePool } from "../tests/helpers";
+import { decodeValidatorListAccount, findValidatorStakeInfo, getStakePool, recordedTransientStakeSeed } from "../tests/helpers";
 import { StakePool } from "../tests/stake_pool/types";
 import { getConnection, getStakePoolAccount, getStakePoolProgramId } from "./utils";
 
@@ -237,17 +237,20 @@ async function getStakeAccountToSplit(
   );
   console.log("Validator stake account:", validatorStakeAccount.toBase58());
 
-  const transientStakeSeed = 0;
+  // the transient account in flight is the one recorded in the validator list, not seed 0
+  const validators = await decodeValidatorListAccount(connection, stakePool.validatorList);
+  const validatorInfo = findValidatorStakeInfo(validators, validatorVoteAccount);
+  const transientStakeSeed = recordedTransientStakeSeed(validatorInfo);
   const [transientStakeAccount] = PublicKey.findProgramAddressSync(
     [
       Buffer.from("transient"),
       validatorVoteAccount.toBuffer(),
       stake_pool_account.toBuffer(),
-      new BN(transientStakeSeed).toArrayLike(Buffer, "le", 8),
+      transientStakeSeed.toArrayLike(Buffer, "le", 8),
     ],
     stake_pool_program_id
   );
-  console.log("Transient stake account:", transientStakeAccount.toBase58());
+  console.log("Transient stake account:", transientStakeAccount.toBase58(), "transientStakeSeed:", transientStakeSeed.toString());
 
   const stakeAccountBalance = await connection.getBalance(validatorStakeAccount);
   const minLamportsOnStakeAccount = await getMinLamportsOnStakeAccount(connection);
@@ -270,7 +273,6 @@ async function getStakeAccountToSplit(
   }
 
   // find validators with active stake above min stake account balance
-  const validators = await decodeValidatorListAccount(connection, stakePool.validatorList);
   const validatorsWithStake = validators.validators.filter((validator) => {
     return Number(validator.active_stake_lamports) > minLamportsOnStakeAccount;
   });

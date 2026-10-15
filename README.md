@@ -54,8 +54,15 @@ This bot optimises the allocation of active stake across validators by allocatin
 
 Because depositing to a specific validator is permissionless, a whitelisted user can add transient stake to a validator and briefly delay this bot's stake *decrease* / rebalancing on that validator for an epoch. This is an accepted, self-healing trade-off rather than a vulnerability: the delayed operation is yield optimisation (not safety-critical), no user funds are at risk and no other user's deposit or withdrawal path is affected, the actor bears a real recurring cost (SOL plus stake-account rent) on every cycle and can be removed in a single transaction via whitelist revocation, and the condition clears automatically as epoch maintenance proceeds.
 
-#### Ephemeral stake seed
-The validator-specific instructions (`deposit_to_specific_validator`, `increase_validator_stake`, `decrease_validator_stake`) invoke the Stake Pool Program's *additional* stake operations, which use a short-lived **ephemeral** stake account. That account is a pool-global PDA derived from a caller-chosen `u64` seed, and the Stake Pool Program creates it with `Allocate`/`Assign`, which tolerates an address that already holds lamports. Each instruction therefore takes a required `ephemeral_seed`, and callers must pass a fresh (e.g. random) seed on every call together with the matching ephemeral account. This prevents a persistent denial of service in which someone pre-funds a single fixed ephemeral address to permanently block rebalancing: because the seed is not fixed, a poisoned address is simply abandoned in favour of a fresh one.
+#### Ephemeral and transient stake seeds
+The validator-specific instructions (`deposit_to_specific_validator`, `increase_validator_stake`, `decrease_validator_stake`) invoke the Stake Pool Program's *additional* stake operations. These move stake through two program-derived stake accounts whose addresses include a caller-chosen `u64` seed. The Staker takes both seeds from the caller, together with the matching accounts, so that neither address is ever fixed:
+
+- **Ephemeral stake account** (`ephemeral_seed`): a short-lived, pool-global PDA. The Stake Pool Program creates it with `Allocate`/`Assign`, which tolerates an address that already holds lamports, so a single pre-funded fixed address could permanently block every validator-specific instruction. Callers pass a fresh (e.g. random) seed on every call, and a poisoned address is simply abandoned.
+- **Transient stake account** (`transient_seed`): a per-validator PDA that holds stake while it activates or deactivates, until epoch maintenance (`UpdateValidatorListBalance`) merges it away. The validator list records the seed of the transient in flight (`transient_seed_suffix`) and whether one exists (`transient_stake_lamports`). The rule for the seed is:
+  - while transient stake is in flight, pass the recorded `transient_seed_suffix` (the Stake Pool Program rejects any other seed with `InvalidSeeds`);
+  - otherwise pass a fresh seed, chosen at random like the ephemeral seed. A predictable choice such as the recorded suffix + 1 would be attacker-steerable: a whitelisted depositor can set the recorded suffix to any value while nothing is in flight, and so line up a refilled address as the next seed.
+
+  A merged seed must never be reused. The merge leaves a zero-lamport, stake-owned account that anyone can keep alive by transferring its rent-exempt minimum in the same transaction, and the Stake Pool Program's next `Allocate` of that address then fails ("already in use"). With the seed hardcoded to `0` this was a permanent, permissionless denial of service against the three instructions (Immunefi #94595); with a caller-supplied seed the refilled address is left behind, at the cost of one rent-exempt balance to the attacker. A transaction built against a stale validator list (a transient was created or merged in between) fails with `InvalidSeeds` and should be rebuilt from the current list. The maintenance and removal paths (`UpdateValidatorListBalance`, `RemoveValidatorFromPool`) derive the transient account from the validator list, so clients must do the same instead of assuming seed `0`; see `transientStakeSeedFor` and `recordedTransientStakeSeed` in `tests/helpers.ts` and the `increase-stake`, `decrease-stake`, `deposit-to-specific-validator` and `remove-validator` scripts.
 
 
 ## Authorities
@@ -69,6 +76,8 @@ The owner can:
 - Pause and unpause the contract.
 - Add or remove validators from the stake pool.
 - Update the stake manager authority.
+
+The owner is always also an agent, so it can manage agents and the whitelist. `InitializeStaker` creates the owner's agent account, and `ClaimOwnership` creates one for the new owner if they are not already an agent, with the new owner paying its rent. The owner's agent account cannot be removed and no agent can remove themselves, so there is always at least one agent. A former owner remains an agent until another agent removes them.
 
 ### Stake Manager
 The `stake_manager` authority is set to a single-signature account at contract initialization.

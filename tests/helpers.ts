@@ -56,8 +56,61 @@ export function findValidatorStakeAccount(
   return pda;
 }
 
-// A fresh random u64 to use as the ephemeral stake seed. Using a new value per call keeps the
-// pool-global ephemeral PDA unpredictable so it cannot be pre-funded / poisoned ahead of time.
+// Returns the entry for `validatorVoteAccount` in an already-decoded validator list; throws if the
+// validator is not in the pool. Use it instead of getValidatorStakeInfo when the list is needed
+// for something else too, to save a fetch.
+export function findValidatorStakeInfo(
+  validatorList: { validators: ValidatorStakeInfo[] },
+  validatorVoteAccount: PublicKey
+): ValidatorStakeInfo {
+  const info = validatorList.validators.find((v: ValidatorStakeInfo) =>
+    v.vote_account_address.equals(validatorVoteAccount)
+  );
+  if (!info) {
+    throw new Error(`Validator ${validatorVoteAccount.toBase58()} not found in the validator list`);
+  }
+  return info;
+}
+
+// Fetches the validator list and returns the entry for `validatorVoteAccount`; throws if the
+// validator is not in the pool.
+export async function getValidatorStakeInfo(
+  connection: Connection,
+  validatorListAccount: PublicKey,
+  validatorVoteAccount: PublicKey
+): Promise<ValidatorStakeInfo> {
+  const validatorList = await decodeValidatorListAccount(connection, validatorListAccount);
+  return findValidatorStakeInfo(validatorList, validatorVoteAccount);
+}
+
+// The transient stake seed recorded in the validator list: the seed of the transient in flight,
+// or of the last one merged. It is what SPL checks the transient account against in
+// UpdateValidatorListBalance and RemoveValidatorFromPool.
+export function recordedTransientStakeSeed(info: ValidatorStakeInfo): BN {
+  return new BN(info.transient_seed_suffix.toString());
+}
+
+// Whether the validator list records transient stake in flight for this validator.
+export function hasTransientStake(info: ValidatorStakeInfo): boolean {
+  // borsh hands back a BN at runtime although the field is typed bigint; a string round-trip
+  // works for both
+  return !new BN(info.transient_stake_lamports.toString()).isZero();
+}
+
+// The transient stake seed to pass to the validator-specific instructions for this validator.
+// SPL requires the recorded seed while transient stake is in flight. Once that transient has been
+// merged any seed never used for this validator is valid, and it is chosen at random (like the
+// ephemeral seed) so nobody can line up a poisoned address in advance: a merged transient PDA can
+// be kept alive by refilling its rent (see transient_poison.test.ts), and a whitelisted depositor
+// can set the recorded suffix to any value while nothing is in flight, so a predictable choice
+// such as "recorded suffix + 1" would be attacker-steerable.
+export function transientStakeSeedFor(info: ValidatorStakeInfo): BN {
+  return hasTransientStake(info) ? recordedTransientStakeSeed(info) : randomStakeSeed();
+}
+
+// A fresh random u64 to use as a stake seed: the ephemeral seed on every call, and the transient
+// seed when no transient stake is in flight. A new value per call keeps the PDA unpredictable so
+// it cannot be pre-funded / poisoned ahead of time.
 export function randomStakeSeed(): BN {
   return new BN(randomBytes(8));
 }
@@ -172,8 +225,33 @@ export async function initStaker(owner: PublicKey, stakeManager: PublicKey): Pro
       }
       break;
     }
-    await new Promise((resolve) => setTimeout(resolve, 5000));
+    // poll often: time spent noticing the roll-over is taken out of the window the
+    // epoch-sensitive tests have for their next steps
+    await new Promise((resolve) => setTimeout(resolve, 1000));
   }
+}
+
+// Simulates `tx`, signed by `feePayer` and `signers`, and asserts it fails with a log line
+// containing `needle`. Simulating leaves the chain untouched and exposes the CPI logs, which is
+// where SPL and the system program explain the failure.
+export async function simulateExpectingLog(
+  connection: Connection,
+  tx: Transaction,
+  feePayer: Keypair,
+  signers: Keypair[],
+  needle: string,
+  label: string
+) {
+  tx.feePayer = feePayer.publicKey;
+  tx.recentBlockhash = (await connection.getLatestBlockhash()).blockhash;
+  tx.sign(feePayer, ...signers);
+  const sim = await connection.simulateTransaction(tx);
+  assert.ok(sim.value.err, `${label}: expected the transaction to fail`);
+  const logs = sim.value.logs ?? [];
+  assert.isTrue(
+    logs.some((l) => l.includes(needle)),
+    `${label}: expected a log containing "${needle}", got:\n${logs.join("\n")}`
+  );
 }
 
 export async function moveEpochForwardAndUpdatePool(
@@ -518,48 +596,34 @@ export async function getStakePoolSharePrice(
 }
 
 
-export async function updateValidatorListBalance(
+// Builds the SPL UpdateValidatorListBalance instruction for a single validator. The transient
+// stake account is derived from `transientStakeSeed`, which must be the validator list's
+// `transient_seed_suffix`: SPL skips the (validator, transient) pair otherwise.
+export function buildUpdateValidatorListBalanceIx(
   validatorVoteAccount: PublicKey,
   stakePoolAccount: PublicKey,
   poolWithdrawAuthority: PublicKey,
   validatorListAccount: PublicKey,
   poolReserveStakeAccount: PublicKey,
-  transientStakeSeed: number = 0
-) {
-
-  const provider = AnchorProvider.local(undefined, CONFIRMED_OPTS);
-
-  // derive the validator transient stake account PDA
-  const [transientStakeAccount] = await PublicKey.findProgramAddressSync(
-    [
-      Buffer.from("transient"),
-      validatorVoteAccount.toBuffer(),
-      stakePoolAccount.toBuffer(),
-      new BN(transientStakeSeed).toArrayLike(Buffer, "le", 8),
-    ],
-    STAKE_POOL_PROGRAM_ID
+  transientStakeSeed: number | BN,
+  noMerge: boolean = false // false: merge matured transient stake accounts
+): TransactionInstruction {
+  const transientStakeAccount = findTransientStakeAccount(
+    validatorVoteAccount,
+    stakePoolAccount,
+    transientStakeSeed
   );
-
-  // derive the validator stake account PDA
-  const [validatorStakeAccount] = PublicKey.findProgramAddressSync([
-    validatorVoteAccount.toBuffer(),
-    stakePoolAccount.toBuffer(),
-  ],
-    STAKE_POOL_PROGRAM_ID
-  );
+  const validatorStakeAccount = findValidatorStakeAccount(validatorVoteAccount, stakePoolAccount);
 
   // serialize UpdateValidatorListBalance instruction data
   const startIndex = 0; // start from the first validator
-  const noMerge = false; // allow merging transient stake accounts
-
   const instructionData = Buffer.concat([
     Buffer.from(Uint8Array.of(6)), // Instruction index for UpdateValidatorListBalance
     Buffer.from(new Uint32Array([startIndex]).buffer), // start_index as u32 (little-endian)
     Buffer.from(Uint8Array.of(noMerge ? 1 : 0)), // no_merge as bool
   ]);
 
-  // construct the UpdateValidatorListBalance instruction
-  const updateValidatorListBalanceIx = new TransactionInstruction({
+  return new TransactionInstruction({
     programId: STAKE_POOL_PROGRAM_ID,
     keys: [
       { pubkey: stakePoolAccount, isSigner: false, isWritable: true }, // Stake pool
@@ -575,6 +639,37 @@ export async function updateValidatorListBalance(
     ],
     data: instructionData,
   });
+}
+
+// Sends UpdateValidatorListBalance for a single validator. When `transientStakeSeed` is not given
+// it is read from the validator list (`transient_seed_suffix`), which is what SPL checks the
+// transient account against, so callers do not need to track the seed in flight; this throws if
+// the validator has no entry in the list (e.g. after CleanupRemovedValidatorEntries), so pass the
+// seed explicitly in that case.
+export async function updateValidatorListBalance(
+  validatorVoteAccount: PublicKey,
+  stakePoolAccount: PublicKey,
+  poolWithdrawAuthority: PublicKey,
+  validatorListAccount: PublicKey,
+  poolReserveStakeAccount: PublicKey,
+  transientStakeSeed?: number | BN
+) {
+
+  const provider = AnchorProvider.local(undefined, CONFIRMED_OPTS);
+
+  if (transientStakeSeed === undefined) {
+    const info = await getValidatorStakeInfo(provider.connection, validatorListAccount, validatorVoteAccount);
+    transientStakeSeed = recordedTransientStakeSeed(info);
+  }
+
+  const updateValidatorListBalanceIx = buildUpdateValidatorListBalanceIx(
+    validatorVoteAccount,
+    stakePoolAccount,
+    poolWithdrawAuthority,
+    validatorListAccount,
+    poolReserveStakeAccount,
+    transientStakeSeed
+  );
 
   // send the UpdateValidatorListBalance transaction
   const transaction = new Transaction().add(updateValidatorListBalanceIx);

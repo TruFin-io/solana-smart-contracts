@@ -31,8 +31,14 @@ DEFAULT_SLOTS_PER_EPOCH=32
 # WithdrawStake all reject a pool whose last_update_epoch is behind (error 0x11),
 # and updating the pool mid-scenario would absorb the owner donation that the test
 # exists to observe. A scenario measures ~14 slots, so 32 leaves no usable margin.
+#
+# transient_poison has to fit several steps inside one epoch after every
+# rollover: the attacker's merge-and-refill, the pool balance update, a blocked
+# simulation and the route-around transaction. 64 slots keeps that window
+# comfortable on slow runners while epoch moves still take seconds.
 SLOTS_PER_EPOCH_OVERRIDES=(
   "tests/add_validator_donation.test.ts:432000"
+  "tests/transient_poison.test.ts:64"
 )
 
 # Returns the slots-per-epoch to use for a given test file.

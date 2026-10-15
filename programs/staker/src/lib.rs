@@ -116,6 +116,17 @@ pub mod staker {
         staking::process_deposit(ctx, amount)
     }
 
+    /// `transient_seed`: SPL transient stake seed. The transient stake account is a per-validator
+    /// PDA derived from this seed, and the Stake Pool program only creates it (`Allocate`/`Assign`)
+    /// when the validator has no transient stake in flight. While transient stake is in flight,
+    /// SPL requires the seed recorded in the validator list (`transient_seed_suffix`); once that
+    /// transient has been merged by epoch maintenance, pass a fresh (e.g. random) seed. Never
+    /// reuse a merged seed, and do not pick the next one predictably: anyone can keep an emptied
+    /// transient PDA alive by refilling its rent in the merge transaction, after which SPL can no
+    /// longer `Allocate` that address, and a whitelisted depositor can set the recorded suffix to
+    /// any value while nothing is in flight. Taking the seed from the caller means such an
+    /// address is simply abandoned instead of blocking this instruction for good.
+    ///
     /// `ephemeral_seed`: SPL ephemeral stake seed. The ephemeral stake account is a pool-global
     /// PDA derived from this seed, and SPL creates it with `Allocate`/`Assign`, which tolerates a
     /// pre-funded address. Pass a fresh (e.g. random) seed each call so the address is never
@@ -123,9 +134,10 @@ pub mod staker {
     pub fn deposit_to_specific_validator(
         ctx: Context<DepositToSpecificValidator>,
         amount: u64,
+        transient_seed: u64,
         ephemeral_seed: u64,
     ) -> Result<()> {
-        staking::process_deposit_to_specific_validator(ctx, amount, 0, ephemeral_seed)
+        staking::process_deposit_to_specific_validator(ctx, amount, transient_seed, ephemeral_seed)
     }
 
     pub fn add_validator(ctx: Context<AddValidator>, validator_seed: u32) -> Result<()> {
@@ -136,23 +148,33 @@ pub mod staker {
         validators::process_remove_validator(ctx)
     }
 
+    /// `transient_seed`: SPL transient stake seed. Must be the validator list's
+    /// `transient_seed_suffix` while transient stake is in flight; otherwise a fresh (e.g. random)
+    /// seed. See `deposit_to_specific_validator`.
+    ///
     /// `ephemeral_seed`: SPL ephemeral stake seed. Pass a fresh (e.g. random) seed each call so
     /// the pool-global ephemeral PDA is never fixed and a poisoned address can be routed around.
     pub fn increase_validator_stake(
         ctx: Context<IncreaseValidatorStake>,
         amount: u64,
+        transient_seed: u64,
         ephemeral_seed: u64,
     ) -> Result<()> {
-        validators::process_increase_validator_stake(ctx, amount, 0, ephemeral_seed)
+        validators::process_increase_validator_stake(ctx, amount, transient_seed, ephemeral_seed)
     }
 
+    /// `transient_seed`: SPL transient stake seed. Must be the validator list's
+    /// `transient_seed_suffix` while transient stake is in flight; otherwise a fresh (e.g. random)
+    /// seed. See `deposit_to_specific_validator`.
+    ///
     /// `ephemeral_seed`: SPL ephemeral stake seed. Pass a fresh (e.g. random) seed each call so
     /// the pool-global ephemeral PDA is never fixed and a poisoned address can be routed around.
     pub fn decrease_validator_stake(
         ctx: Context<DecreaseValidatorStake>,
         amount: u64,
+        transient_seed: u64,
         ephemeral_seed: u64,
     ) -> Result<()> {
-        validators::process_decrease_validator_stake(ctx, amount, 0, ephemeral_seed)
+        validators::process_decrease_validator_stake(ctx, amount, transient_seed, ephemeral_seed)
     }
 }

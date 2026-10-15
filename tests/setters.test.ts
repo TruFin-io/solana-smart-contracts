@@ -1,7 +1,7 @@
 import * as anchor from "@coral-xyz/anchor";
 import { initStaker, fetchEvent, getEvent, requestAirdrop , setupConfirmedProvider} from "./helpers";
 import { assert } from "chai";
-import { Keypair, LAMPORTS_PER_SOL, PublicKey } from "@solana/web3.js";
+import { Keypair, LAMPORTS_PER_SOL, PublicKey, SystemProgram, Transaction } from "@solana/web3.js";
 import { Staker } from "../target/types/staker";
 import { getAccount } from "@solana/spl-token";
 
@@ -185,7 +185,8 @@ describe("Setters", () => {
     tx.recentBlockhash = blockhash;
     tx.sign(user);
 
-    const event = await fetchEvent(program, tx, 0);
+    // the event follows the creation of the new owner's agent account
+    const event = await fetchEvent(program, tx, 1);
     assert.strictEqual(event.name, "claimedOwnership");
     assert.strictEqual(
       event.data.oldOwner.toString(),
@@ -203,6 +204,14 @@ describe("Setters", () => {
       user.publicKey.toString()
     );
     assert.strictEqual(access_account.pendingOwner, null);
+
+    // check the new owner is now an agent
+    const [user_agent_address] = PublicKey.findProgramAddressSync(
+      [Buffer.from("agent"), user.publicKey.toBuffer()],
+      program.programId
+    );
+    const user_agent = await program.account.agent.fetch(user_agent_address);
+    assert.ok(user_agent, "New owner's agent account should exist");
   });
 
   it("Claiming ownership with no pending owner fails", async () => {
@@ -244,6 +253,111 @@ describe("Setters", () => {
     }
 
     // reset to original owner
+    await program.methods
+      .claimOwnership()
+      .accounts({
+        pendingOwner: provider.wallet.publicKey,
+      })
+      .rpc();
+  });
+
+  it("Existing agent can claim ownership", async () => {
+    // user became an agent when it first claimed ownership
+    const [user_agent_address] = PublicKey.findProgramAddressSync(
+      [Buffer.from("agent"), user.publicKey.toBuffer()],
+      program.programId
+    );
+    const agent_lamports_before = (
+      await provider.connection.getAccountInfo(user_agent_address)
+    ).lamports;
+    const user_lamports_before = await provider.connection.getBalance(
+      user.publicKey
+    );
+
+    await program.methods.setPendingOwner(user.publicKey).rpc();
+    const txHash = await program.methods
+      .claimOwnership()
+      .accounts({
+        pendingOwner: user.publicKey,
+      })
+      .signers([user])
+      .rpc();
+
+    const event = await getEvent(program, txHash, "claimedOwnership");
+    assert.strictEqual(event.data.newOwner.toString(), user.publicKey.toString());
+
+    // check the existing agent account is reused, so the new owner pays no rent
+    const agent_lamports_after = (
+      await provider.connection.getAccountInfo(user_agent_address)
+    ).lamports;
+    assert.strictEqual(agent_lamports_after, agent_lamports_before);
+    assert.strictEqual(
+      await provider.connection.getBalance(user.publicKey),
+      user_lamports_before
+    );
+
+    // reset to original owner
+    await program.methods
+      .setPendingOwner(provider.wallet.publicKey)
+      .accountsPartial({
+        owner: user.publicKey,
+      })
+      .signers([user])
+      .rpc();
+    await program.methods
+      .claimOwnership()
+      .accounts({
+        pendingOwner: provider.wallet.publicKey,
+      })
+      .rpc();
+  });
+
+  it("Can claim ownership when the new owner's agent account address is pre-funded", async () => {
+    const new_owner = Keypair.generate();
+    await requestAirdrop(provider.connection, new_owner.publicKey, 1);
+    const [new_owner_agent_address] = PublicKey.findProgramAddressSync(
+      [Buffer.from("agent"), new_owner.publicKey.toBuffer()],
+      program.programId
+    );
+
+    // anyone can send lamports to the agent account address before it is created
+    await provider.sendAndConfirm(
+      new Transaction().add(
+        SystemProgram.transfer({
+          fromPubkey: provider.wallet.publicKey,
+          toPubkey: new_owner_agent_address,
+          lamports: LAMPORTS_PER_SOL / 100,
+        })
+      )
+    );
+
+    await program.methods.setPendingOwner(new_owner.publicKey).rpc();
+    await program.methods
+      .claimOwnership()
+      .accounts({
+        pendingOwner: new_owner.publicKey,
+      })
+      .signers([new_owner])
+      .rpc();
+
+    const access_account = await program.account.access.fetch(accessAddress);
+    assert.strictEqual(
+      access_account.owner.toString(),
+      new_owner.publicKey.toString()
+    );
+    const new_owner_agent = await program.account.agent.fetch(
+      new_owner_agent_address
+    );
+    assert.ok(new_owner_agent, "New owner's agent account should exist");
+
+    // reset to original owner
+    await program.methods
+      .setPendingOwner(provider.wallet.publicKey)
+      .accountsPartial({
+        owner: new_owner.publicKey,
+      })
+      .signers([new_owner])
+      .rpc();
     await program.methods
       .claimOwnership()
       .accounts({

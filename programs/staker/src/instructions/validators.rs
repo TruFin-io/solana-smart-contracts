@@ -342,6 +342,10 @@ pub struct IncreaseValidatorStake<'info> {
 }
 
 /// Processes the `IncreaseValidatorStake` instruction
+///
+/// `transient_stake_seed` and `ephemeral_stake_seed` are caller-supplied so that neither PDA is
+/// pinned to a fixed address an outsider could poison (see `deposit_to_specific_validator` in
+/// `lib.rs` for the seed rules).
 pub fn process_increase_validator_stake(
     ctx: Context<IncreaseValidatorStake>,
     amount: u64,
@@ -483,6 +487,10 @@ pub struct DecreaseValidatorStake<'info> {
 }
 
 /// Processes the `DecreaseValidatorStake` instruction
+///
+/// `transient_stake_seed` and `ephemeral_stake_seed` are caller-supplied so that neither PDA is
+/// pinned to a fixed address an outsider could poison (see `deposit_to_specific_validator` in
+/// `lib.rs` for the seed rules).
 pub fn process_decrease_validator_stake(
     ctx: Context<DecreaseValidatorStake>,
     amount: u64,
